@@ -12,6 +12,7 @@
 
 struct fetch_st {
 	char *username;
+	char *machine_name;
 	struct fetch_kernel_st {
 		char *sysname;  // OS implementation
 		char *nodename; // Hostname
@@ -20,9 +21,9 @@ struct fetch_st {
 		char *machine;  // Architecture
 	} kernel;
 	struct fetch_os_st {
-		char *name;
-		char *id;
-		char *pretty_name;
+		char *name;        // os-release: "NAME"
+		char *id;          // os-release: "ID"
+		char *pretty_name; // os-release: "PRETTY_NAME"
 	} os;
 	struct sysinfo sys; // Not Cached
 };
@@ -65,22 +66,28 @@ void cache_uname(struct fetch_st *fetched)
 	fetched->kernel.machine  = ar_strcpy(buf.machine);
 }
 
-char *get_value(char *line)
+char *get_value(const char *line, const char *key)
 {
-	char *result = strtok(line, "=\"");
-	result = strtok(NULL, "=\"");
+	char *result = NULL;
+
+	if (strstr(line, key) != NULL && line[0] == key[0])
+	{
+		result = strchr(line, '=');
+		result = strtok(result, "=\"");
+	}
+
 	return result;
 }
 
 void cache_os_release(struct fetch_st *fetched)
 {
-	FILE *file     = NULL;
+	FILE *file           = NULL;
 	char line[LINE_SIZE] = {0};
-	int  line_i    =  0;
-	char ch        =  0;
-	bool name_flag = true, id_flag = true, pretty_flag = true;
+	int  line_i          = 0;
+	char ch              = 0;
+	bool name = true, id = true, pretty = true;
 
-	// Open find and open 'os-release'
+	// Open 'os-release'
 	file = fopen("/etc/os-release", "r");
 	if (file == NULL)
 	{
@@ -99,26 +106,25 @@ void cache_os_release(struct fetch_st *fetched)
 		line[line_i] = ch;
 		line_i += 1;
 
-		// Check line, if line size is bigger than LINE_SIZE it gets truncated
 		if (ch == '\n' || line_i == LINE_SIZE)
 		{
-			// Add NULL byte at the end
 			line[line_i-1] = 0;
 
-			if (name_flag && strstr(line, "NAME") != NULL && line[0] == 'N')
+			char *value = NULL;
+			if (name && (value = get_value(line, "NAME")) != NULL)
 			{
-				fetched->os.name = ar_strcpy(get_value(line));
-				name_flag = false;
+				fetched->os.name = ar_strcpy(value);
+				name = false;
 			}
-			else if (id_flag && strstr(line, "ID") != NULL && line[0] == 'I')
+			else if (id && (value = get_value(line, "ID")) != NULL)
 			{
-				fetched->os.id = ar_strcpy(get_value(line));
-				id_flag = false;
+				fetched->os.id = ar_strcpy(value);
+				id = false;
 			}
-			else if (pretty_flag && strstr(line, "PRETTY_NAME") != NULL && line[0] == 'P')
+			else if (pretty && (value = get_value(line, "PRETTY_NAME")) != NULL)
 			{
-				fetched->os.pretty_name = ar_strcpy(get_value(line));
-				pretty_flag = false;
+				fetched->os.pretty_name = ar_strcpy(value);
+				pretty = false;
 			}
 
 			// Reset line index
@@ -127,6 +133,65 @@ void cache_os_release(struct fetch_st *fetched)
 	}
 
 	fclose(file);
+}
+
+void cache_host_machine(struct fetch_st *fetched)
+{
+	const char *product_name    = "/sys/devices/virtual/dmi/id/product_name";
+	const char *product_version = "/sys/devices/virtual/dmi/id/product_version";
+
+	FILE *file           = NULL;
+	char line[LINE_SIZE] = {0};
+	char line_i          = 0;
+	char ch              = 0;
+	bool name = true, version =  true;
+
+	// product_name
+	file = fopen(product_name, "r");
+	if (file == NULL)
+		name = false;
+
+	if (name)
+	{
+		while((ch = fgetc(file)) != EOF && line_i < LINE_SIZE)
+		{
+			line[line_i] = ch;
+			line_i += 1;
+		}
+		line[line_i-1] = 0;
+		fclose(file);
+	}
+
+	// product_version
+	file = fopen(product_version, "r");
+	if (file == NULL)
+		version = false;
+
+	if (version)
+	{
+		if (name)
+		{
+			line[line_i-1] = ' ';
+		}
+
+		while((ch = fgetc(file)) != EOF && line_i < LINE_SIZE)
+		{
+			line[line_i] = ch;
+			line_i += 1;
+		}
+		line[line_i-1] = 0;
+
+		fclose(file);
+	}
+
+
+	if (!name && !version)
+	{
+		printf("Couldn't find machine host name\n");
+		exit(EXIT_FAILURE);
+	}
+
+	fetched->machine_name = ar_strcpy(line);
 }
 
 // TODO: Add Options
@@ -143,6 +208,14 @@ int main(void)
 	cache_uname(&fetched);
 	// Get OS and Distro
 	cache_os_release(&fetched);
+	// Get Host Machine info
+	cache_host_machine(&fetched);
+	// Get System info (Not Cached)
+	if (sysinfo(&fetched.sys) == -1)
+	{
+		printf("Couldn't fetch sysinfo.\n");
+		exit(EXIT_FAILURE);
+	}
 
 	// usernmae@hostname
 	printf("\033[1;31m%s\033[m@\033[1;31m%s\033[m\n", fetched.username, fetched.kernel.nodename);
@@ -152,13 +225,29 @@ int main(void)
 	printf("\n");
 	// OS
 	printf("\033[1;31mOS\033[m: %s %s\n", fetched.os.pretty_name, fetched.kernel.machine);
+	// Host
+	printf("\033[1;31mHOST\033[m: %s\n", fetched.machine_name);
+	// Kernel
 	printf("\033[1;31mKernel Release\033[m: %s\n", fetched.kernel.release, fetched.kernel.version);
-	printf("\33[1;31mKernel Version\033[m: %s\n", fetched.kernel.version);
-
+	printf("\033[1;31mKernel Version\033[m: %s\n", fetched.kernel.version);
+	// Uptime
+	int uptime = fetched.sys.uptime;
+	int sec    = uptime % 60;
+	int min    = (uptime / 60) % 60;
+	int hour   = ((uptime / 60) / 60) % 24;
+	int day    = ((uptime / 60) / 60) / 24;
+	printf("\033[1;31mUptime\033[m: ");
+	if (day > 0)
+		printf("%d %s ", day, (day > 1) ? "days" : "day");
+	if (hour > 0)
+		printf("%d %s ", hour, (hour > 1) ? "hours" : "hour");
+	printf("%d %s ", min, (min > 1) ? "mins" : "min");
+	printf("%d %s ", sec, (sec > 1) ? "secs" : "sec");
+	printf("\n");
 
 #if ARENA_DEBUG
 	printf("\nDebug:\nArena Count: [ %d / %d ]\n", g_StrArenaIndex, STR_ARENA_SIZE);
-	printf("Arena Data:\n>>>");
+	printf("Arena Data:\n>>>\n");
 	for(int i = 0; i < g_StrArenaIndex; i++)
 	{
 		char ch = g_StrArena[i];
@@ -167,10 +256,12 @@ int main(void)
 			printf("[0x%02X]", ch);
 		else
 			printf("%c", ch);
+
+		if (ch == 0)
+			printf("\n");
 	}
 	printf("<<<\n");
 #endif
 
-error:
-	return -1;
+	return 0;
 }
