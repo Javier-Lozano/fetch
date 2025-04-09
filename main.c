@@ -2,86 +2,131 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <unistd.h>
-#include <asm/termbits.h>
-#include <sys/ioctl.h>
+#include <stdlib.h>
 #include <sys/utsname.h>
 #include <sys/sysinfo.h>
 
-#define FETCH_DEBUG      1
-#define FETCH_ARENA_SIZE (1024 * 4)
-#define FETCH_TMP_SIZE   (128)
+#define FETCH_DEBUG   0
+#define ARENA_SIZE    (1024 * 4)
+#define TMP_SIZE      (128)
+#define DEFAULT_WIDTH (35)
 
-///// Types
+//  ╒══════════════════════════════════════════════╕
+//  │              username@hostname               │
+//  ╞══════════════════════════════════════════════╡
+//	│       OS: /etc/os-release                    │
+//	│   Kernel: uname                              │
+//	│    Model: /sys/class/dmi/id/product_*        │
+//	│    Shell: $SHELL                             │
+//	│   Uptime: sysinfo                            │
+//	│ Terminal: proc/ppid/stat                     │
+//	└──────────────────────────────────────────────┘
 
-// Fetch
-
-enum {
-	FLAG_OPT_ALL_COLS,   // Use all horizontal space available. Set trough Command Line Arguments
-	FLAG_OPT_SIMPLE,     // Show information in a simple way.   Set trough Command Line Arguments
-	FLAG_SHOW_TRUECOLOR, // Terminal support RGB colors.        Set trough 'check_truecolor()'
-	FLAG_SHOW_NAME,      // Show Username and Hostname.         Set trough 'cache_uname()'
-	FLAG_SHOW_DISTRO,    // Show OS Distro Name.                Set trough 'cache_distro_name()'
-	FLAG_COUNT
-};
-
-typedef struct fetch_st {
-	// User
-	int  rows, cols;
+typedef struct {
 	char *username;
-
-	// Uname
-	char *sysname;  // OS implementation
-	char *nodename; // Hostname
-	char *release;  // Kernel release
-	char *version;  // Kernel OS version
-	char *machine;  // Architecture
-
-	// OS
-	char *distro_name;
+	char *osname;
+	char *model;
+	char *kernel;
+	char *uptime;
+	char *shell;
+//	char *wm;
+	char *terminal;
+	char *cpu;
+	char *gpu;
+	char *memory;
+	struct utsname uname;
+	struct sysinfo sysinfo;
 } Fetch;
 
-///// Globals
+///// Flags
 
-//// OS
-//char *name;        // os-release: "NAME"
-//char *id;          // os-release: "ID"
-//char *pretty_name; // os-release: "PRETTY_NAME"
-//
-//// Sys. Info [ Not Cached ]
-//struct sysinfo sys; // Not Cached
-// Flags
+enum {
+	FLAG_ISATTY,
+	FLAG_TRUECOLOR,
+	FLAG_COUNT
+};
 bool g_Flags[FLAG_COUNT];
 
-// Colors Palette
+///// Color
 
-int g_Colors[16][3] = {
-	/* Normal Black   */ {0X44, 0X4B, 0X6A},
-	/* Normal Red     */ {0XFF, 0X7A, 0X93},
-	/* Normal Green   */ {0XB9, 0XF2, 0X7C},
-	/* Normal Yellow  */ {0XFF, 0X9E, 0X64},
-	/* Normal Blue    */ {0X7D, 0XA6, 0XFF},
-	/* Normal Magenta */ {0XBB, 0X9A, 0XF7},
-	/* Normal Cyan    */ {0X0D, 0XB9, 0XD7},
-	/* Normal White   */ {0XAC, 0XB0, 0XD0},
-	/* Light  Black   */ {0X32, 0X34, 0X4A},
-	/* Light  Red     */ {0XF7, 0X76, 0X8E},
-	/* Light  Green   */ {0X9E, 0XCE, 0X6A},
-	/* Light  Yellow  */ {0XE0, 0XAF, 0X68},
-	/* Light  Blue    */ {0X7A, 0XA2, 0XF7},
-	/* Light  Magenta */ {0XAD, 0X8E, 0XE6},
-	/* Light  Cyan    */ {0X44, 0X9D, 0XAB},
-	/* Light  White   */ {0X78, 0X7C, 0X99}
+enum {
+	C_NONE = -1,
+	C_BLACK,  C_RED,  C_GREEN,  C_YELLOW,  C_BLUE,  C_MAGENTA,  C_CYAN,  C_WHITE,
+	C_LBLACK, C_LRED, C_LGREEN, C_LYELLOW, C_LBLUE, C_LMAGENTA, C_LCYAN, C_LWHITE,
+	C_COUNT
+};
+unsigned char g_Palette[C_COUNT][3] = { // Default palette based on Konsole 'Breeze'
+	/* Normal Black   */ {0x20, 0x28, 0x28},
+	/* Normal Red     */ {0xF0, 0x15, 0x15},
+	/* Normal Green   */ {0x10, 0xD8, 0x18},
+	/* Normal Yellow  */ {0xF0, 0xC0, 0x00},
+	/* Normal Blue    */ {0x20, 0x98, 0xF0},
+	/* Normal Magenta */ {0x90, 0x48, 0xB0},
+	/* Normal Cyan    */ {0x18, 0xA0, 0x88},
+	/* Normal White   */ {0xE0, 0xE0, 0xE0},
+	/*  Light Black   */ {0x50, 0x58, 0x58},
+	/*  Light Red     */ {0xE0, 0x40, 0x30},
+	/*  Light Green   */ {0x20, 0xE0, 0x80},
+	/*  Light Yellow  */ {0xFF, 0xC0, 0x50},
+	/*  Light Blue    */ {0x38, 0xB0, 0xF0},
+	/*  Light Magenta */ {0x98, 0x60, 0xB8},
+	/*  Light Cyan    */ {0x20, 0xC0, 0xA0},
+	/*  Light White   */ {0xFF, 0xFF, 0xFF}
 };
 
+void set_color(char fg, char bg, bool bold)
+{
+	if (!g_Flags[FLAG_ISATTY])
+		return;
 
-// Arena
-char   g_StrArena[FETCH_ARENA_SIZE];
+	// Bold
+	printf("\033[%dm", bold ? 1 : 22);
+
+	if (g_Flags[FLAG_TRUECOLOR])
+	{
+		// RGB Foreground
+		if (fg > -1 && fg < C_COUNT)
+			printf("\033[38;2;%u;%u;%um", g_Palette[fg][0], g_Palette[fg][1], g_Palette[fg][2]);
+		else
+			printf("\033[39m");
+
+		// RGB Background
+		if (bg > -1 && bg < C_COUNT)
+			printf("\033[48;2;%u;%u;%um", g_Palette[bg][0], g_Palette[bg][1], g_Palette[bg][2]);
+		else
+			printf("\033[49m");
+	}
+	else
+	{
+		// ANSI Foreground
+		if (fg > -1 && fg < C_COUNT)
+			printf("\033[%dm", (fg < 8) ? 30 + fg : 82 + fg);
+		else
+			printf("\033[39m");
+
+		// ANSI Background
+		if (bg > -1 && bg < C_COUNT)
+			printf("\033[%dm", (bg < 8) ? 40 + bg : 92 + bg);
+		else
+			printf("\033[49m");
+	}
+}
+
+void reset_color()
+{
+	if (!g_Flags[FLAG_ISATTY])
+		return;
+
+	printf("\033[0m");
+}
+
+///// String Arena
+
+char   g_StrArena[ARENA_SIZE];
 size_t g_StrArenaIndex;
 int    g_StrLongest;
-
-///// Arena
+int    g_BoxWidth = DEFAULT_WIDTH;
 
 char *ar_append(const char *str)
 {
@@ -93,7 +138,7 @@ char *ar_append(const char *str)
 
 	len = strlen(str);
 
-	if (len != 0 && (g_StrArenaIndex + len + 1) <= FETCH_ARENA_SIZE);
+	if (len != 0 && (g_StrArenaIndex + len + 1) <= ARENA_SIZE);
 	{
 		if (len > g_StrLongest) g_StrLongest = len;
 		result = g_StrArena + g_StrArenaIndex;
@@ -104,117 +149,47 @@ char *ar_append(const char *str)
 	return result;
 }
 
-///// Math Functions
-
-float f_fmodf(float a, float b)
+char *concatenate(char *dst, int dst_size, const char *src, int src_size)
 {
-	float mod;
+	int dst_len = 0;
+	int size = 0;
 
-	mod = (a < 0) ? -a : a;
-	b   = (b < 0) ? -b : b;
+	if (dst == NULL || src == NULL)
+		return NULL;
 
-	while (mod >= b)
-		mod -= b;
+	dst_len = strlen(dst);
+	size    = strlen(src);
 
-	if (a < 0)
-		return -mod;
+	if (src_size < size)
+		size = src_size;
 
-	return mod;
+	if (dst_len + size + 1 > dst_size)
+		size -= (dst_len + size + 1) - dst_size;
+
+	if (size < 0)
+		return dst;
+
+	strncpy(dst + dst_len, src, size);
+
+	return dst;
 }
 
-float f_fabsf(float a)
+///// Get
+
+bool get_truecolor()
 {
-	float     f = a;
-	uint32_t *i = (uint32_t *)&f;
-	*i &= 0x7fffffff;
-	return f;
-}
-
-float f_lerp(float a, float b, float t)
-{
-	return ((1 - t) * a) + (t * b);
-}
-
-void hue_to_rgb(float hue, int *r, int *g, int *b)
-{
-
-	float h, x;
-	float f_r, f_g, f_b;
-
-	h = f_fmodf(hue, 360) / 60;
-	x = (1 - f_fabsf(f_fmodf(h, 2)-1));
-
-	if (h >= 0 && h < 1)
-	{
-		f_r = 255;
-		f_g = x * 255;
-		f_b = 0;
-	}
-	else if (h >= 1 && h < 2)
-	{
-		f_r = x * 255;
-		f_g = 255;
-		f_b = 0;
-	}
-	else if (h >= 2 && h < 3)
-	{
-		f_r = 0;
-		f_g = 255;
-		f_b = x * 255;
-	}
-	else if (h >= 3 && h < 4)
-	{
-		f_r = 0;
-		f_g = x * 255;
-		f_b = 255;
-	}
-	else if (h >= 4 && h < 5)
-	{
-		f_r = x * 255;
-		f_g = 0;
-		f_b = 255;
-	}
-	else if (h >= 5 && h < 6)
-	{
-		f_r = 255;
-		f_g = 0;
-		f_b = x * 255;
-	}
-
-	*r = f_r;
-	*g = f_g;
-	*b = f_b;
-}
-
-///// Fetch Functions
-
-void check_term_size(int *cols, int *rows)
-{
-	struct winsize term;
-
-	if (ioctl(STDIN_FILENO, TIOCGWINSZ, &term) == -1)
-	{
-		fprintf(stderr, "Couldn't get Terminal Size\n");
-		exit(EXIT_FAILURE);
-	}
-
-	*cols = term.ws_col;
-}
-
-bool check_truecolor()
-{
-	char tmp[FETCH_TMP_SIZE] = {0};
 	FILE *proc = NULL;
+	char tmp[TMP_SIZE] = {0};
 
 	// Check if process is attached to a tty
-	if (!isatty(STDOUT_FILENO))
+	if (!g_Flags[FLAG_ISATTY])
 		return false;
 
 	// $COLORTERM
 	proc = popen("echo $COLORTERM", "r");
 	if (proc != NULL)
 	{
-		while(fgets(tmp, FETCH_TMP_SIZE, proc) != NULL);
+		while(fgets(tmp, TMP_SIZE, proc) != NULL);
 		pclose(proc);
 
 		if (strstr(tmp, "truecolor") != NULL || strstr(tmp, "24bit") != NULL)
@@ -225,7 +200,7 @@ bool check_truecolor()
 	proc = popen("echo $TERM", "r");
 	if (proc != NULL)
 	{
-		while(fgets(tmp, FETCH_TMP_SIZE, proc) != NULL);
+		while(fgets(tmp, TMP_SIZE, proc) != NULL);
 		pclose(proc);
 
 		if (strstr(tmp, "256color") != NULL || strstr(tmp, "xterm-kitty") != NULL)
@@ -235,265 +210,387 @@ bool check_truecolor()
 	return false;
 }
 
-void set_pallete(Fetch *fetch)
+void get_name(Fetch *fetch)
 {
-	if (g_Flags[FLAG_SHOW_TRUECOLOR])
+	char tmp[TMP_SIZE] = {0};
+	char *name = getlogin();
+	if (name != NULL)
 	{
-	}
-	else
-	{
+		snprintf(tmp, TMP_SIZE, "%s@%s", name, fetch->uname.nodename);
+		fetch->username = ar_append(tmp);
 	}
 }
 
-void set_fg_color(int n)
+void get_os(Fetch *fetch)
 {
-	if (n > 15 || n < 0)
-		return;
+	char tmp[TMP_SIZE] = {0};
+	char *osname = NULL;
+	FILE *file = NULL;
 
-	printf("\033[38;2;%d;%d;%dm", g_Colors[n][0], g_Colors[n][1], g_Colors[n][2]);
-}
-
-
-void cache_uname(Fetch *fetch)
-{
-	char tmp[FETCH_TMP_SIZE] = {0};
-	struct utsname buf;
-
-	if (uname(&buf) == -1)
+	file = fopen("/etc/os-release", "r");
+	if (file == NULL)
 	{
-		g_Flags[FLAG_SHOW_NAME] = false;
-		return;
+		file = fopen("/usr/lib/os-release", "r");
+		if (file == NULL)
+			return;
 	}
 
-	fetch->sysname  = ar_append(buf.sysname);
-	fetch->nodename = ar_append(buf.nodename);
-	fetch->release  = ar_append(buf.release);
-	fetch->version  = ar_append(buf.version);
-	fetch->machine  = ar_append(buf.machine);
-
-	if (getlogin_r(tmp, FETCH_TMP_SIZE) != 0)
+	while(fgets(tmp, TMP_SIZE, file) != NULL)
 	{
-		g_Flags[FLAG_SHOW_NAME] = false;
-		return;
-	}
-	fetch->username = ar_append(tmp);
-	g_Flags[FLAG_SHOW_NAME] = true;
-}
-
-void cache_distro_name(Fetch *fetch)
-{
-	char  tmp[FETCH_TMP_SIZE] = {0};
-	char *result = NULL;
-	FILE *f      = NULL;
-
-	f = fopen("/etc/os-release", "r");
-	if (f == NULL)
-	{
-		g_Flags[FLAG_SHOW_DISTRO] = false;
-		return;
-	}
-
-	while(fgets(tmp, FETCH_TMP_SIZE, f) != NULL)
-	{
-		//printf("%s", tmp);
-		if (strstr(tmp, "PRETTY_NAME") != NULL) 
+		if (strstr(tmp, "PRETTY_NAME") != NULL)
 		{
-			g_Flags[FLAG_SHOW_DISTRO] = true;
-			result = strchr(tmp, '=');
-			result = strtok(result, "=\"");
-			fetch->distro_name = ar_append(result);
+			osname = strtok(tmp,  "=\"\n");
+			osname = strtok(NULL, "=\"\n");
+			fetch->osname = ar_append(osname);
+		}
+	}
+
+	fclose(file);
+}
+
+void get_model(Fetch *fetch)
+{
+	char tmp[TMP_SIZE] = {0};
+	char model[TMP_SIZE] = {0};
+	FILE *file = NULL;
+
+	file = fopen("/sys/class/dmi/id/product_name", "r");
+	if (file != NULL)
+	{
+		while(fgets(tmp, TMP_SIZE, file) != NULL)
+		{
+			char *token = strtok(tmp, "\n");
+			if (token != NULL)
+				concatenate(model, TMP_SIZE, token, strlen(token));
+		}
+		fclose(file);
+	}
+
+	file = fopen("/sys/class/dmi/id/product_version", "r");
+	if (file != NULL)
+	{
+		while(fgets(tmp, TMP_SIZE, file) != NULL)
+		{
+			char *token = strtok(tmp, "\n");
+			if (token != NULL)
+			{
+				if (strlen(model) > 0)
+					concatenate(model, TMP_SIZE, " ", 1);
+				concatenate(model, TMP_SIZE, token, strlen(token));
+			}
+		}
+		fclose(file);
+	}
+
+	if (strlen(model) > 0)
+		fetch->model = ar_append(model);
+}
+
+void get_kernel(Fetch *fetch)
+{
+	char tmp[TMP_SIZE] = {0};
+	snprintf(tmp, TMP_SIZE, "%s", fetch->uname.release);
+	//snprintf(tmp, TMP_SIZE, "%s %s", fetch->uname.release, fetch->uname.version);
+	fetch->kernel = ar_append(tmp);
+}
+
+void get_uptime(Fetch *fetch)
+{
+	char tmp[TMP_SIZE] = {0};
+	char uptime_str[TMP_SIZE] = {0};
+
+	long uptime = fetch->sysinfo.uptime;
+	int mins   = (uptime / 60) % 60;
+	int hours  = (uptime / 3600) % 24;
+	int days   = (uptime / 86400);
+
+	if (uptime >= 86400)
+		snprintf(tmp, TMP_SIZE, "%d days, %d hours, %d mins", days, hours, mins);
+	else if (uptime >= 3600)
+		snprintf(tmp, TMP_SIZE, "%d hours, %d mins", hours, mins);
+	else
+		snprintf(tmp, TMP_SIZE, "%d mins", mins);
+
+	fetch->uptime = ar_append(tmp);
+}
+
+void get_shell(Fetch *fetch)
+{
+	char tmp[TMP_SIZE] = {0};
+	char shell[TMP_SIZE] = {0};
+	FILE *proc = NULL;
+
+	// $SHELL
+	proc = popen("echo ${SHELL##*/}", "r");
+	if (proc != NULL)
+	{
+		while(fgets(tmp, TMP_SIZE, proc) != NULL)
+		{
+			char *token = strtok(tmp, "\n");
+			if (token != NULL)
+				concatenate(shell, TMP_SIZE, token, strlen(token));
+		}
+		pclose(proc);
+	}
+
+	// bash
+	if (strncmp(shell, "bash", TMP_SIZE) == 0)
+	{
+		proc = popen("$SHELL -c 'echo $BASH_VERSION'", "r");
+		if (proc != NULL)
+		{
+			while(fgets(tmp, TMP_SIZE, proc) != NULL)
+			{
+				char *token = strtok(tmp, "\n");
+				if (token != NULL)
+				{
+					concatenate(shell, TMP_SIZE, " ", 1);
+					concatenate(shell, TMP_SIZE, token, strlen(token));
+				}
+			}
+			pclose(proc);
+		}
+	}
+
+	if (strlen(shell) > 1)
+		fetch->shell = ar_append(shell);
+}
+
+//void get_wm(Fetch *fetch)
+//{
+//}
+
+pid_t get_parent_pid(pid_t pid)
+{
+	char tmp[TMP_SIZE] = {0};
+	pid_t ppid = -1;
+	FILE *file = NULL;
+
+	snprintf(tmp, TMP_SIZE, "/proc/%d/stat", pid);
+	file = fopen(tmp, "r");
+	if (file != NULL)
+	{
+		while(fgets(tmp, TMP_SIZE, file) != NULL)
+		{
+			char *result = strtok(tmp, " ");
+			for(int i = 0; i < 3; i += 1)
+				result = strtok(NULL, " ");
+			ppid = atol(result);
+			break;
+		}
+		fclose(file);
+	}
+
+	return ppid;
+}
+
+void get_proc_name(pid_t pid, char *str, size_t size)
+{
+	char tmp[TMP_SIZE] = {0};
+	FILE *file = NULL;
+
+	// Clear buffer
+	memset(str, 0, sizeof(char) * size);
+
+	snprintf(tmp, TMP_SIZE, "/proc/%d/stat", pid);
+	file = fopen(tmp, "r");
+	if (file != NULL)
+	{
+		while(fgets(tmp, TMP_SIZE, file) != NULL)
+		{
+			char *result = strtok(tmp, " ()");
+			result = strtok(NULL, " ()");
+
+			if (result != NULL)
+				strncpy(str, result, size);
+
+			break;
+		}
+		fclose(file);
+	}
+}
+
+void get_terminal(Fetch *fetch)
+{
+	char tmp[TMP_SIZE] = {0};
+	pid_t pid = get_parent_pid(getppid());
+	get_proc_name(pid, tmp, TMP_SIZE);
+
+	if (strlen(tmp) > 1)
+		fetch->terminal = ar_append(tmp);
+}
+
+void get_cpu(Fetch *fetch)
+{
+	char tmp[TMP_SIZE] = {0};
+	FILE *file = NULL;
+
+	file = fopen("/proc/cpuinfo", "r");
+	if (file == NULL)
+		return;
+
+	while(fgets(tmp, TMP_SIZE, file) != NULL)
+	{
+		if (strstr(tmp, "model name") != NULL)
+		{
+			char *token = strtok(tmp, ":");
+			token = strtok(NULL, ":\n");
+			fetch->cpu = ar_append(token + 1);
 			break;
 		}
 	}
 
-	fclose(f);
+	fclose(file);
 }
 
-///// Printing Functions
+///// Print
 
 void print_name(Fetch *fetch)
 {
-	int user_len, host_len, len;
+	int len = strlen(fetch->username);
+	int mid = (g_BoxWidth / 2) - (len / 2);
 
-	if (!g_Flags[FLAG_SHOW_NAME])
+	printf("╒");
+	for(int i = 0; i < g_BoxWidth; i++)
+		printf("═");
+	printf("╕\n");
+		
+	printf("│");
+	for(int i = 0; i < (g_BoxWidth / 2) - (len / 2); i++)
+		printf(" ");
+	set_color(C_LCYAN, -1, true);
+	printf("%s", fetch->username);
+	reset_color();
+	for(int i = 0; i < g_BoxWidth - (mid + len); i++)
+		printf(" ");
+	printf("│\n");
+
+	printf("╞");
+	for(int i = 0; i < g_BoxWidth; i++)
+		printf("═");
+	printf("╡\n");
+}
+
+void print_tag(const char *tag, char *str)
+{
+	if (tag == NULL || str == NULL)
 		return;
 
-	user_len = strlen(fetch->username);
-	host_len = strlen(fetch->nodename);
-	len = user_len + host_len + 1;
+	int tag_len = strlen(tag) + 3;
+	int str_len = strlen(str);
 
-	if (g_Flags[FLAG_SHOW_TRUECOLOR])
-	{
-		printf("\033[1m");
-		printf("\033[38;2;%d;%d;%dm", 171, 233, 179);
-		printf("%s", fetch->username);
-		printf("\033[38;2;%d;%d;%dm", 242, 143, 173);
-		printf("@%s\n", fetch->nodename);
-		printf("\033[38;2;%d;%d;%dm", 185, 193, 221);
-	}
-	else
-	{
-		printf("\033[1m\033[92m%s\033[95m@%s\n", fetch->username, fetch->nodename);
-	}
-
-	for(int i = 0; i < len; i++)
-		printf("═");
-
-	printf("\033[0m\n");
+	printf("│ ");
+	set_color(C_LGREEN, -1, true);
+	printf("%s\033[0m: ", tag);
+	set_color(C_LYELLOW, -1, false);
+	printf("%s", str);
+	reset_color();
+	for(int i = 0; i < (g_BoxWidth - str_len - tag_len); i++)
+		printf(" ");
+	printf("│\n");
 }
 
-void print_distro(Fetch *fetch)
-{
-	if (g_Flags[FLAG_SHOW_DISTRO])
-	{
-		if (g_Flags[FLAG_SHOW_TRUECOLOR])
-		{
-			printf("\033[1m");
-			printf("\033[38;2;%d;%d;%dm", 245, 194, 231);
-			printf("OS: ");
-			printf("\033[38;2;%d;%d;%dm", 185, 193, 221);
-			printf("%s\n", fetch->distro_name);
-		}
-		else
-		{
-			printf("\033[1m\033[92mOS:\033[0m %s\n", fetch->distro_name);
-		}
-	}
-	else
-	{
-		if (g_Flags[FLAG_SHOW_TRUECOLOR])
-		{
-			printf("\033[1m");
-			printf("\033[38;2;%d;%d;%dm", 245, 194, 231);
-			printf("OS: ");
-			printf("\033[38;2;%d;%d;%dm", 185, 193, 221);
-			printf("%s\n", fetch->sysname);
-		}
-		else
-		{
-			printf("\033[1m\033[92mOS:\033[0m %s\n", fetch->sysname);
-		}
-	}
-	printf("\033[0m");
-}
 
-void print_color(Fetch *fetch)
+void print_colors()
 {
-	//const int sections = fetch->cols;
-	const int sections = 80;
-	int r, g, b;
-	float hue;
+	if (!g_Flags[FLAG_ISATTY])
+		return;
+
+	int mid   = g_BoxWidth / 2;
+
+	// Empty Line
+	printf("│");
+	for(int i = 0; i < g_BoxWidth; i++)
+		printf(" ");
+	printf("│");
+
+	// Dark Colors
+	printf("\n│");
+	for(int i = 0; i < mid - 8; i++)
+		printf(" ");
+	for(int i = 0; i < C_COUNT / 2; i+=1)
+	{
+		set_color(-1, i, false);
+		printf("  ");
+	}
+	reset_color();
+	for(int i = 0; i < g_BoxWidth - (mid + 8); i++)
+		printf(" ");
+	printf("│");
+
+	// Bright Colors
+	printf("\n│");
+	for(int i = 0; i < mid - 8; i++)
+		printf(" ");
+	for(int i = 0; i < C_COUNT / 2; i+=1)
+	{
+		set_color(-1, i+8, false);
+		printf("  ");
+	}
+	reset_color();
+	for(int i = 0; i < g_BoxWidth - (mid + 8); i++)
+		printf(" ");
+	printf("│");
 
 	printf("\n");
-	if (g_Flags[FLAG_SHOW_TRUECOLOR])
-	{
-		for(int i = 0; i < sections; i++)
-		{
-			hue = ((float)(i+1) / (float)sections) * 360;
-			hue_to_rgb(hue, &r, &g, &b);
-			printf("\033[48;2;%d;%d;%dm ", r, g, b);
-		}
-		printf("\n");
-	}
-	else
-	{
-		printf( "\033[40m  "
-				"\033[41m  "
-				"\033[42m  "
-				"\033[43m  "
-				"\033[44m  "
-				"\033[45m  "
-				"\033[46m  "
-				"\033[47m  \n"
-				"\033[100m  "
-				"\033[101m  "
-				"\033[102m  "
-				"\033[103m  "
-				"\033[104m  "
-				"\033[105m  "
-				"\033[106m  "
-				"\033[107m  "
-				"\033[0m\n");
-	}
-	printf("\033[0m");
 }
 
-void init(Fetch *fetch)
-{
-	// Clear Fetch
-	memset(fetch, 0, sizeof(Fetch));
+///// Main
 
-	// TODO: Process Options
-
-	// Check Truecolor
-	g_Flags[FLAG_SHOW_TRUECOLOR] = check_truecolor();
-
-	// Get Username and chache Uname
-	cache_uname(fetch);
-
-	// Get Distro Name
-	cache_distro_name(fetch);
-
-	// Get Terminal Columns and Rows
-	check_term_size(&fetch->cols, &fetch->rows);
-}
-
-
-int main(void)
+int main(int arcg, char *argv[])
 {
 	Fetch fetch;
-	init(&fetch);
+
+	// Initialize to Zero
+	memset(&fetch, 0, sizeof(&fetch));
+
+	// Cache Uname and Sysinfo
+	if (uname(&fetch.uname) != 0 || sysinfo(&fetch.sysinfo) != 0)
+		exit(EXIT_FAILURE);
+
+	// Check if Output is a TTY
+	g_Flags[FLAG_ISATTY] = isatty(STDOUT_FILENO);
+
+	// Fetch
+	g_Flags[FLAG_TRUECOLOR] = get_truecolor();
+	get_name(&fetch);
+	get_os(&fetch);
+	get_model(&fetch);
+	get_kernel(&fetch);
+	get_uptime(&fetch);
+	get_shell(&fetch);
+	get_terminal(&fetch);
+	get_cpu(&fetch);
+
+	// Print
+	if (g_StrLongest + 12 > g_BoxWidth)
+		g_BoxWidth = g_StrLongest + 12;
 
 	print_name(&fetch);
-	print_distro(&fetch);
-	print_color(&fetch);
-//	// Get OS and Distro
-//	cache_os_release(&fetched);
-//	// Get Host Machine info
-//	cache_host_machine(&fetched);
-//	// Get System info (Not Cached)
-//	if (sysinfo(&fetched.sys) == -1)
-//	{
-//		printf("Couldn't fetch sysinfo.\n");
-//		exit(EXIT_FAILURE);
-//	}
-//
-//	// usernmae@hostname
-//	printf("\033[1;31m%s\033[m@\033[1;31m%s\033[m\n", fetched.username, fetched.kernel.nodename);
-//	for(int i = 0; i < (strlen(fetched.username) + strlen(fetched.kernel.nodename) + 1); i += 1)
-//		printf("-");
-//
-//	printf("\n");
-//	// OS
-//	printf("\033[1;31mOS\033[m: %s %s\n", fetched.os.pretty_name, fetched.kernel.machine);
-//	// Host
-//	printf("\033[1;31mHOST\033[m: %s\n", fetched.machine_name);
-//	// Kernel
-//	printf("\033[1;31mKernel Release\033[m: %s\n", fetched.kernel.release, fetched.kernel.version);
-//	printf("\033[1;31mKernel Version\033[m: %s\n", fetched.kernel.version);
-//	// Uptime
-//	int uptime = fetched.sys.uptime;
-//	int sec    = uptime % 60;
-//	int min    = (uptime / 60) % 60;
-//	int hour   = ((uptime / 60) / 60) % 24;
-//	int day    = ((uptime / 60) / 60) / 24;
-//	printf("\033[1;31mUptime\033[m: ");
-//	if (day > 0)
-//		printf("%d %s ", day, (day > 1) ? "days" : "day");
-//	if (hour > 0)
-//		printf("%d %s ", hour, (hour > 1) ? "hours" : "hour");
-//	printf("%d %s ", min, (min > 1) ? "mins" : "min");
-//	printf("%d %s ", sec, (sec > 1) ? "secs" : "sec");
-//	printf("\n");
+	print_tag("OS", fetch.osname);
+	print_tag("Model", fetch.model);
+	print_tag("Kernel", fetch.kernel);
+	print_tag("Uptime", fetch.uptime);
+	print_tag("Shell", fetch.shell);
+	print_tag("Terminal",fetch.terminal);
+	print_tag("CPU", fetch.cpu);
+	print_colors();
+
+	printf("└");
+	for (int i = 0; i < g_BoxWidth; i++)
+		printf("─");
+	printf("┘\n");
 
 #if FETCH_DEBUG
-	printf("\nDebug:\n");
-	printf("Terminal Size: %dx%d\n", fetch.cols, fetch.rows);
-	for(int i = 0; i < fetch.cols; i++)
-		printf("*");
-	printf("\n");
-	printf("Arena Count: [ \033[1m\033[92m%d\033[0m / \033[1m\033[92m%d\033[0m ]\n", g_StrArenaIndex, FETCH_ARENA_SIZE);
-	printf("Arena Data:\n>>>\n");
+	printf("\n[ DEBUG ]\n");
+	printf("Arena Size: [ \033[1m\033[92m%d\033[0m / \033[1m\033[92m%d\033[0m ]\n", g_StrArenaIndex, ARENA_SIZE);
+	printf("Longest String: %d\n", g_StrLongest);
+	printf("Longest Tag (Terminal): %d\n", 8);
+	printf("Spacing: %d\n", 4);
+	printf("Proposed Box Width: %d\n", g_StrLongest + 8 + 4);
+	printf("Minimum Box Width: %d\n", DEFAULT_WIDTH);
+	printf("Box Width: %d\n", g_BoxWidth);
+	printf("Arena Data\n>>>\n");
 	for(int i = 0; i < g_StrArenaIndex; i++)
 	{
 		char ch = g_StrArena[i];
@@ -511,3 +608,4 @@ int main(void)
 
 	return 0;
 }
+
